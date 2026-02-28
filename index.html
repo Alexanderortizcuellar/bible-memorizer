@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8" />
+	<title>Bible Memorization App</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+	<script src="https://cdn.tailwindcss.com"></script>
+
+	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+	<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+	<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+	<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+	<style>
+		@keyframes fadeIn {
+			from {
+				opacity: 0;
+				transform: translateY(10px);
+			}
+
+			to {
+				opacity: 1;
+				transform: translateY(0);
+			}
+		}
+
+		.animate-fade-in {
+			animation: fadeIn 0.3s ease-out forwards;
+		}
+
+		@keyframes shake {
+
+			0%,
+			100% {
+				transform: translateX(0);
+			}
+
+			25% {
+				transform: translateX(-4px);
+			}
+
+			75% {
+				transform: translateX(4px);
+			}
+		}
+
+		.animate-shake {
+			animation: shake 0.2s ease-in-out;
+		}
+
+		.progress-bar {
+			transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+		}
+
+		.pb-safe {
+			padding-bottom: max(1rem, env(safe-area-inset-bottom));
+		}
+
+		body {
+			overflow: hidden;
+			background-color: #f8fafc;
+		}
+
+	</style>
+</head>
+
+<body class="text-slate-800 font-sans selection:bg-blue-200">
+	<div id="root"></div>
+
+	<script type="text/babel">
+
+		/* ================= CONFIG ================= */
+		const BASE_API_ROOT = "https://alexanderortizcuellar.github.io/memorizer-data";
+		const HIDE_PERCENTAGE = 0.20;
+		const MIN_HIDE_COUNT = 3;
+		const PICK_OPTIONS_COUNT = 4;
+
+		/* ================= UTILITIES ================= */
+		function safeFetchJSON(url) {
+			return fetch(url).then(res => {
+				if (!res.ok) throw new Error("Could not find data. Please check your inputs.");
+				return res.json();
+			});
+		}
+
+		function shuffleArray(array) {
+			const copy = [...array];
+			for (let i = copy.length - 1; i > 0; i--) {
+				const j = Math.floor(Math.random() * (i + 1));
+				[copy[i], copy[j]] = [copy[j], copy[i]];
+			}
+			return copy;
+		}
+
+		function parseVerseRange(input, maxVerse) {
+			if (!input) return null;
+			const clean = input.trim();
+
+			if (clean.includes("-")) {
+				const [start, end] = clean.split("-").map(v => parseInt(v.trim(), 10));
+				if (isNaN(start) || isNaN(end) || start < 1 || end < start || end > maxVerse) return null;
+				return {start, end};
+			}
+
+			const single = parseInt(clean, 10);
+			if (isNaN(single) || single < 1 || single > maxVerse) return null;
+			return {start: single, end: single};
+		}
+
+		function removeAccents(str) {
+			return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+		}
+
+		function tokenizeText(text) {
+			const regex = /(\s+|[^\p{L}\p{N}_]+|[\p{L}\p{N}_]+)/gu;
+			const rawTokens = text.match(regex) || [];
+
+			return rawTokens.map((value, index) => {
+				let type = "word";
+				if (/^\s+$/.test(value)) type = "space";
+				else if (/^[^\p{L}\p{N}_]+$/u.test(value)) type = "punct";
+				return {id: index, type, value};
+			});
+		}
+
+		/* ================= MODE ENGINE ================= */
+
+		function generatePickOptionsForIndex(index, order, wordBank) {
+			if (index >= order.length) return [];
+			const correctId = order[index];
+			const correct = wordBank.find(w => w.id === correctId);
+			if (!correct) return [];
+
+			const uniqueValues = new Set();
+			uniqueValues.add(removeAccents(correct.value.toUpperCase()));
+
+			const distractorPool = [];
+			for (const w of shuffleArray(wordBank)) {
+				const upperVal = removeAccents(w.value.toUpperCase());
+				if (!uniqueValues.has(upperVal)) {
+					uniqueValues.add(upperVal);
+					distractorPool.push(w);
+				}
+			}
+
+			const distractors = distractorPool.slice(0, PICK_OPTIONS_COUNT - 1);
+			return shuffleArray([correct, ...distractors]);
+		}
+
+		const modes = {
+			hide: {
+				initialize(tokens) {return {hidden: new Set()};},
+				action(state, tokens) {
+					const wordIds = tokens.filter(t => t.type === "word").map(t => t.id);
+					const remaining = wordIds.filter(id => !state.hidden.has(id));
+					if (remaining.length === 0) return state;
+
+					let amountToHide = Math.max(MIN_HIDE_COUNT, Math.floor(remaining.length * HIDE_PERCENTAGE));
+					amountToHide = Math.min(amountToHide, remaining.length);
+
+					const selected = shuffleArray(remaining).slice(0, amountToHide);
+					const newSet = new Set(state.hidden);
+					selected.forEach(id => newSet.add(id));
+					return {hidden: newSet};
+				},
+				isComplete(state, tokens) {
+					const totalWords = tokens.filter(t => t.type === "word").length;
+					return state.hidden.size >= totalWords;
+				},
+				getProgress(state, totalWords) {
+					return totalWords === 0 ? 0 : (state.hidden.size / totalWords) * 100;
+				}
+			},
+			pick: {
+				initialize(tokens) {
+					const words = tokens.filter(t => t.type === "word");
+					const order = words.map(t => t.id);
+					const wordBank = words.map(t => ({id: t.id, value: t.value}));
+					const currentOptions = generatePickOptionsForIndex(0, order, wordBank);
+					return {index: 0, order, wordBank, currentOptions};
+				},
+				action(state, tokens, payload) {
+					if (!payload) return state;
+					const expected = state.order[state.index];
+					if (payload.id === expected) {
+						const nextIndex = state.index + 1;
+						return {
+							...state,
+							index: nextIndex,
+							currentOptions: generatePickOptionsForIndex(nextIndex, state.order, state.wordBank)
+						};
+					}
+					return state;
+				},
+				isComplete(state) {
+					return state.index >= state.order.length;
+				},
+				getProgress(state, totalWords) {
+					return totalWords === 0 ? 0 : (state.index / totalWords) * 100;
+				}
+			},
+			type: {
+				initialize(tokens) {
+					const words = tokens.filter(t => t.type === "word");
+					return {index: 0, order: words.map(t => t.id)};
+				},
+				action(state, tokens, payload) {
+					if (!payload) return state;
+					const expectedId = state.order[state.index];
+					const token = tokens.find(t => t.id === expectedId);
+					if (!token) return state;
+
+					const userChar = removeAccents(payload.toLowerCase());
+					const expectedChar = removeAccents(token.value[0].toLowerCase());
+
+					if (userChar === expectedChar) return {...state, index: state.index + 1};
+					return state;
+				},
+				isComplete(state) {
+					return state.index >= state.order.length;
+				},
+				getProgress(state, totalWords) {
+					return totalWords === 0 ? 0 : (state.index / totalWords) * 100;
+				}
+			}
+		};
+
+		/* ================= APP ================= */
+		function App() {
+			const [screen, setScreen] = React.useState("setup");
+			const [activeMode, setActiveMode] = React.useState(null);
+
+			const [version, setVersion] = React.useState("esv");
+			const [book, setBook] = React.useState("john");
+			const [chapter, setChapter] = React.useState("3");
+			const [verseInput, setVerseInput] = React.useState("16");
+
+			const [booksData, setBooksData] = React.useState(null);
+			const [versesData, setVersesData] = React.useState([]);
+			const [currentVerseIndex, setCurrentVerseIndex] = React.useState(0);
+
+			const [modeState, setModeState] = React.useState(null);
+			const [feedbackStatus, setFeedbackStatus] = React.useState(null);
+			const [feedbackTargetId, setFeedbackTargetId] = React.useState(null);
+
+			// Track mistakes per word for the heatmap color coding
+			const [wordMistakes, setWordMistakes] = React.useState({});
+
+			const [error, setError] = React.useState(null);
+			const [loading, setLoading] = React.useState(false);
+
+			// Fetch books dynamically based on version
+			React.useEffect(() => {
+				let active = true;
+				const url = `${BASE_API_ROOT}/${version.toLowerCase()}/books.json`;
+				fetch(url)
+					.then(res => res.ok ? res.json() : null)
+					.then(data => {
+						if (!active) return;
+						setBooksData(data);
+						if (data && data.length > 0) {
+							// Update the book if the current one doesn't exist in the new version
+							setBook(prevBook => {
+								const exists = data.some(b => b.name.toLowerCase() === prevBook.toLowerCase());
+								return exists ? prevBook : data[0].name;
+							});
+							setChapter("1");
+						}
+					})
+					.catch(() => {if (active) setBooksData(null);});
+
+				return () => {active = false;};
+			}, [version]);
+
+			function loadPassage(e) {
+				e.preventDefault();
+				setError(null); setLoading(true);
+
+				const url = `${BASE_API_ROOT}/${version.toLowerCase()}/${book.toLowerCase()}/${chapter}.json`;
+
+				safeFetchJSON(url)
+					.then(data => {
+						const maxVerse = Math.max(...Object.keys(data).map(Number));
+						const range = parseVerseRange(verseInput, maxVerse);
+						if (!range) throw new Error(`Invalid verse range. Max verse is ${maxVerse}.`);
+
+						const parsedVerses = [];
+						for (let i = range.start; i <= range.end; i++) {
+							if (!data[i]) throw new Error("Verse not found: " + i);
+							parsedVerses.push({
+								verseNum: i,
+								tokens: tokenizeText(data[i].trim())
+							});
+						}
+
+						setVersesData(parsedVerses);
+						setCurrentVerseIndex(0);
+						setActiveMode(null);
+						setWordMistakes({});
+						setScreen("memorize");
+					})
+					.catch(err => setError(err.message))
+					.finally(() => setLoading(false));
+			}
+
+			function startMode(newMode) {
+				setActiveMode(newMode);
+				const currentTokens = versesData[currentVerseIndex].tokens;
+				setModeState(modes[newMode].initialize(currentTokens));
+				setFeedbackStatus(null);
+				setFeedbackTargetId(null);
+				setWordMistakes({}); // Reset mistakes on new mode
+			}
+
+			function handleVerseChange(newIndex) {
+				if (newIndex >= 0 && newIndex < versesData.length) {
+					setCurrentVerseIndex(newIndex);
+					if (activeMode) {
+						setModeState(modes[activeMode].initialize(versesData[newIndex].tokens));
+						setFeedbackStatus(null);
+						setFeedbackTargetId(null);
+						setWordMistakes({}); // Reset mistakes on verse change
+					}
+				}
+			}
+
+			function handleAction(payload) {
+				if (!modeState) return;
+
+				const currentTokens = versesData[currentVerseIndex].tokens;
+				const expectedId = modeState.order ? modeState.order[modeState.index] : null;
+				const oldIndex = modeState.index;
+
+				const newState = modes[activeMode].action(modeState, currentTokens, payload);
+
+				// Feedback and Mistake Tracking Logic
+				if (activeMode === 'pick' || activeMode === 'type') {
+					if (newState.index > oldIndex) {
+						// Correct guess
+						setFeedbackTargetId(expectedId);
+						setFeedbackStatus('correct');
+						setTimeout(() => setFeedbackStatus(null), 250);
+					} else if (payload) {
+						// Incorrect guess
+						setFeedbackTargetId(expectedId);
+						setFeedbackStatus('incorrect');
+
+						// Increment mistake counter for the target word
+						setWordMistakes(prev => ({
+							...prev,
+							[expectedId]: (prev[expectedId] || 0) + 1
+						}));
+
+						setTimeout(() => setFeedbackStatus(null), 350);
+					}
+				}
+
+				setModeState(newState);
+			}
+
+			function exitMode() {
+				setActiveMode(null);
+				setModeState(null);
+				setWordMistakes({});
+			}
+
+			function goBackToSetup() {
+				setScreen("setup");
+				setActiveMode(null);
+			}
+
+			/* --- Derived Data for Form --- */
+			let maxChapters = null;
+			if (booksData) {
+				const matchedBook = booksData.find(b => b.name.toLowerCase() === book.toLowerCase());
+				if (matchedBook) maxChapters = matchedBook.chapters;
+			}
+
+			/* --- Setup Screen --- */
+			if (screen === "setup") {
+				return (
+					<div className="flex items-center justify-center min-h-[100dvh] p-4 animate-fade-in bg-slate-50">
+						<div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg max-w-sm w-full space-y-6 border border-slate-100">
+							<div className="text-center space-y-2">
+								<h1 className="text-2xl font-bold text-slate-800 tracking-tight">Memorize</h1>
+								<p className="text-slate-500 text-sm">Load scripture to begin</p>
+							</div>
+
+							<form onSubmit={loadPassage} className="space-y-4">
+								<div className="grid grid-cols-2 gap-4">
+									<div className="flex flex-col">
+										<label className="text-[10px] font-bold text-slate-400 uppercase mb-1 ml-1">Version</label>
+										<input required className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all" value={version} onChange={e => setVersion(e.target.value)} />
+									</div>
+									<div className="flex flex-col">
+										<label className="text-[10px] font-bold text-slate-400 uppercase mb-1 ml-1">Book</label>
+										{booksData && booksData.length > 0 ? (
+											<select className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all capitalize" value={book} onChange={e => {setBook(e.target.value); setChapter("1");}}>
+												{booksData.map(b => (
+													<option key={b.name} value={b.name}>{b.name}</option>
+												))}
+											</select>
+										) : (
+											<input required className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all" value={book} onChange={e => {setBook(e.target.value); setChapter("1");}} />
+										)}
+									</div>
+									<div className="flex flex-col">
+										<label className="text-[10px] font-bold text-slate-400 uppercase mb-1 ml-1">Chapter</label>
+										{maxChapters ? (
+											<select className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all" value={chapter} onChange={e => setChapter(e.target.value)}>
+												{Array.from({length: maxChapters}, (_, i) => (
+													<option key={i + 1} value={i + 1}>{i + 1}</option>
+												))}
+											</select>
+										) : (
+											<input required type="number" min="1" className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all" value={chapter} onChange={e => setChapter(e.target.value)} />
+										)}
+									</div>
+									<div className="flex flex-col">
+										<label className="text-[10px] font-bold text-slate-400 uppercase mb-1 ml-1">Verse(s)</label>
+										<input required className="w-full border border-slate-200 p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm bg-slate-50 focus:bg-white transition-all" value={verseInput} onChange={e => setVerseInput(e.target.value)} placeholder="e.g. 1-3" />
+									</div>
+								</div>
+
+								{error && (
+									<div className="bg-red-50 text-red-600 p-3 rounded-lg text-xs font-medium flex items-center gap-2">
+										<i className="fa-solid fa-circle-exclamation"></i> {error}
+									</div>
+								)}
+
+								<button type="submit" disabled={loading} className="w-full bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white font-semibold py-3 rounded-xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 mt-4 text-sm">
+									{loading ? <i className="fa-solid fa-spinner fa-spin"></i> : <i className="fa-solid fa-arrow-right"></i>}
+									{loading ? "Loading..." : "Start Learning"}
+								</button>
+							</form>
+						</div>
+					</div>
+				);
+			}
+
+			/* --- Memorize Screen --- */
+			const activeVerseObj = versesData[currentVerseIndex];
+			const activeTokens = activeVerseObj ? activeVerseObj.tokens : [];
+			const totalWords = activeTokens.filter(t => t.type === "word").length;
+
+			const progress = (activeMode && modeState) ? modes[activeMode].getProgress(modeState, totalWords) : 0;
+			const isDone = (activeMode && modeState) ? modes[activeMode].isComplete(modeState, activeTokens) : false;
+
+			function renderTokens() {
+				return activeTokens.map((token, index) => {
+					const verseNumElem = index === 0 ? <sup key={`v-${activeVerseObj.verseNum}`} className="text-blue-500 font-bold mr-1 text-sm md:text-base select-none">{activeVerseObj.verseNum}</sup> : null;
+
+					if (token.type !== "word") {
+						return <span key={token.id}>{verseNumElem}{token.value}</span>;
+					}
+
+					let isHidden = false;
+					if (activeMode === "hide" && modeState) {
+						isHidden = modeState.hidden.has(token.id);
+					} else if ((activeMode === "pick" || activeMode === "type") && modeState) {
+						const tIndex = modeState.order.indexOf(token.id);
+						isHidden = tIndex >= modeState.index;
+					}
+
+					// Hidden block styling
+					let blockClasses = "bg-slate-200 text-transparent rounded px-1 mx-[1px] select-none inline-block transition-colors duration-200";
+
+					if (isHidden && token.id === feedbackTargetId) {
+						if (feedbackStatus === 'incorrect') {
+							blockClasses = "bg-red-100 text-red-500/0 rounded px-1 mx-[1px] ring-1 ring-red-400 animate-shake inline-block";
+						} else if (feedbackStatus === 'correct') {
+							blockClasses = "bg-green-100 text-green-500/0 rounded px-1 mx-[1px] ring-1 ring-green-400 inline-block";
+						} else {
+							blockClasses = "bg-slate-300 text-transparent rounded px-1 mx-[1px] ring-1 ring-blue-300 inline-block";
+						}
+					}
+
+					if (isHidden) {
+						return <span key={token.id}>{verseNumElem}<span className={blockClasses}>{token.value}</span></span>;
+					}
+
+					// Revealed word coloring based on mistake heatmap
+					let revealedColor = "text-slate-800"; // 0 mistakes
+					if (wordMistakes[token.id]) {
+						const mistakes = wordMistakes[token.id];
+						if (mistakes === 1) revealedColor = "text-orange-400";
+						else if (mistakes === 2) revealedColor = "text-orange-600";
+						else if (mistakes >= 3) revealedColor = "text-red-500";
+					}
+
+					return <span key={token.id} className={`${revealedColor} transition-colors duration-300`}>{verseNumElem}{token.value}</span>;
+				});
+			}
+
+			return (
+				<div className="flex flex-col h-[100dvh] w-full max-w-2xl mx-auto bg-white animate-fade-in shadow-2xl md:my-0">
+
+					{/* Top Header */}
+					<div className="shrink-0 flex items-center justify-between p-4 border-b border-slate-100 relative bg-white z-10">
+						{activeMode && (
+							<div className="absolute top-0 left-0 w-full h-1 bg-slate-100">
+								<div className="h-full bg-emerald-400 progress-bar" style={{width: `${progress}%`}}></div>
+							</div>
+						)}
+
+						{activeMode ? (
+							<button onClick={exitMode} className="text-slate-400 hover:text-slate-800 font-semibold text-sm flex items-center gap-2 px-2 py-1 transition-colors">
+								<i className="fa-solid fa-chevron-left"></i> Menu
+							</button>
+						) : (
+							<button onClick={goBackToSetup} className="text-slate-400 hover:text-slate-800 font-semibold text-sm flex items-center gap-2 px-2 py-1 transition-colors">
+								<i className="fa-solid fa-chevron-left"></i> Setup
+							</button>
+						)}
+
+						<div className="text-slate-600 font-bold text-sm tracking-tight capitalize">
+							{book} {chapter} <span className="text-slate-400 font-normal uppercase text-xs ml-1">{version}</span>
+						</div>
+
+						<div className="w-[60px]"></div>
+					</div>
+
+					{/* Middle Verse Area */}
+					<div className="flex-1 overflow-y-auto bg-slate-50 flex flex-col justify-between relative">
+
+						{/* Verse Text Container */}
+						<div className="px-6 pt-8 pb-4 md:px-10 md:pt-12 text-xl md:text-2xl leading-relaxed md:leading-loose font-serif text-slate-700 w-full">
+							{activeTokens && renderTokens()}
+						</div>
+
+						{/* Minimal Verse Navigator */}
+						{versesData.length > 1 && (
+							<div className="flex justify-between items-center px-6 py-4 bg-slate-50 border-t border-slate-100/50 mt-auto">
+								<button
+									onClick={() => handleVerseChange(currentVerseIndex - 1)}
+									disabled={currentVerseIndex === 0}
+									className="text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 p-2 transition-colors flex items-center gap-1 text-sm font-semibold"
+								>
+									<i className="fa-solid fa-arrow-left"></i> Prev
+								</button>
+								<div className="text-xs font-bold text-slate-400 bg-white px-3 py-1 rounded-full shadow-sm border border-slate-100">
+									Verse {currentVerseIndex + 1} of {versesData.length}
+								</div>
+								<button
+									onClick={() => handleVerseChange(currentVerseIndex + 1)}
+									disabled={currentVerseIndex === versesData.length - 1}
+									className="text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 p-2 transition-colors flex items-center gap-1 text-sm font-semibold"
+								>
+									Next <i className="fa-solid fa-arrow-right"></i>
+								</button>
+							</div>
+						)}
+					</div>
+
+					{/* Bottom Action Area */}
+					<div className="shrink-0 bg-white border-t border-slate-100 p-4 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.02)] z-10 min-h-[100px] flex items-center justify-center">
+
+						{/* Menu State */}
+						{!activeMode && (
+							<div className="flex justify-around items-center w-full gap-2">
+								{[
+									{id: "hide", icon: "fa-eye-slash", label: "Hide"},
+									{id: "pick", icon: "fa-hand-pointer", label: "Pick"},
+									{id: "type", icon: "fa-font", label: "Type"}
+								].map(m => (
+									<button
+										key={m.id}
+										onClick={() => startMode(m.id)}
+										className="flex flex-col items-center justify-center gap-2 text-slate-500 hover:text-slate-800 hover:bg-slate-50 rounded-xl p-3 w-24 transition-all active:scale-95"
+									>
+										<i className={`fa-solid ${m.icon} text-xl mb-1`}></i>
+										<span className="text-xs font-bold uppercase tracking-wider">{m.label}</span>
+									</button>
+								))}
+							</div>
+						)}
+
+						{/* Activity States */}
+						{activeMode && isDone && (
+							<div className="flex flex-col items-center gap-3 w-full animate-fade-in py-1">
+								<div className="text-emerald-500 font-bold text-lg flex items-center justify-center gap-2">
+									<i className="fa-solid fa-circle-check"></i> Verse Completed!
+								</div>
+								<button
+									onClick={() => startMode(activeMode)}
+									className="text-blue-600 bg-blue-50 hover:bg-blue-100 font-semibold px-4 py-2 rounded-lg text-sm transition-colors flex items-center gap-2"
+								>
+									<i className="fa-solid fa-rotate-right"></i> Restart Activity
+								</button>
+							</div>
+						)}
+
+						{activeMode === "hide" && !isDone && (
+							<button
+								onClick={() => handleAction()}
+								className="bg-slate-800 hover:bg-slate-700 text-white font-medium px-8 py-3 rounded-full transition-all shadow-md active:scale-95 text-sm"
+							>
+								Hide words
+							</button>
+						)}
+
+						{activeMode === "pick" && !isDone && modeState && (
+							<div className="grid grid-cols-2 gap-2 w-full max-w-sm mx-auto">
+								{modeState.currentOptions && modeState.currentOptions.map((option, idx) => (
+									<button
+										key={option.id + "-" + modeState.index + "-" + idx}
+										onClick={() => handleAction(option)}
+										className="bg-slate-50 border border-slate-200 text-slate-700 font-semibold uppercase hover:bg-slate-100 rounded-lg px-2 py-3 transition-all active:scale-95 text-sm"
+									>
+										{option.value}
+									</button>
+								))}
+							</div>
+						)}
+
+						{activeMode === "type" && !isDone && (
+							<div className="w-full flex justify-center py-2">
+								<input
+									autoFocus
+									maxLength={1}
+									className={`border-2 rounded-xl text-center text-2xl font-bold w-14 h-14 focus:outline-none transition-all uppercase shadow-sm
+										${feedbackStatus === 'incorrect' ? 'border-red-400 bg-red-50 text-red-600 animate-shake' :
+											feedbackStatus === 'correct' ? 'border-green-400 bg-green-50 text-green-600' :
+												'border-slate-300 text-slate-800 focus:border-slate-500 bg-white placeholder-slate-300'}`}
+									onChange={e => {
+										handleAction(e.target.value);
+										e.target.value = "";
+									}}
+									placeholder="A"
+								/>
+							</div>
+						)}
+					</div>
+
+				</div>
+			);
+		}
+
+		ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+	</script>
+</body>
+
+</html>
